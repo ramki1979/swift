@@ -47,13 +47,13 @@ literalText = r'(?: [^$\n%] | \$(?![${]) | %(?!%) )*'
 # The part of an '%end' line that follows the '%' sign
 linesClose = r'[\ \t]* end [\ \t]* (?: \# .* )? $'
 
-## Note: Where "# Absorb" appears below, the regexp attempts to eat up
-## through the end of ${...} and %{...}% constructs.  In reality we
-## handle this with the Python tokenizer, which avoids mis-detections
-## due to nesting, comments and strings.  This extra absorption in the
-## regexp facilitates testing the regexp on its own, by preventing the
-## interior of some of these constructs from being treated as literal
-## text.
+# Note: Where "# Absorb" appears below, the regexp attempts to eat up
+# through the end of ${...} and %{...}% constructs.  In reality we
+# handle this with the Python tokenizer, which avoids mis-detections
+# due to nesting, comments and strings.  This extra absorption in the
+# regexp facilitates testing the regexp on its own, by preventing the
+# interior of some of these constructs from being treated as literal
+# text.
 tokenizeRE = re.compile(
     r'''
 # %-lines and %{...}-blocks
@@ -362,6 +362,7 @@ def codeStartsWithDedentKeyword(sourceLines):
 
 class ParseContext:
     """State carried through a parse of a template"""
+
     filename = ''
     template = ''
     lineStarts = []
@@ -385,7 +386,7 @@ class ParseContext:
         return bisect(self.lineStarts, pos) - 1
 
     def tokenGenerator(self, baseTokens):
-        r""" Given an iterator over (kind, text, match) triples (see
+        r"""Given an iterator over (kind, text, match) triples (see
         tokenizeTemplate above), return a refined iterator over
         tokenKinds.
 
@@ -527,6 +528,7 @@ class ParseContext:
 
 class ExecutionContext:
     """State we pass around during execution of a template"""
+
     def __init__(self, lineDirective='// ###line', **localBindings):
         self.localBindings = localBindings
         self.lineDirective = lineDirective
@@ -556,6 +558,7 @@ class ExecutionContext:
 
 class ASTNode(object):
     """Abstract base class for template AST nodes"""
+
     def __init__(self):
         raise NotImplemented
 
@@ -577,6 +580,7 @@ class ASTNode(object):
 
 class Block(ASTNode):
     """A sequence of other AST nodes, to be executed in order"""
+
     children = []
 
     def __init__(self, context):
@@ -598,6 +602,7 @@ class Block(ASTNode):
 
 class Literal(ASTNode):
     """An AST node that generates literal text"""
+
     def __init__(self, context):
         self.text = context.tokenText
         startPosition = context.tokenMatch.start(context.tokenKind)
@@ -614,6 +619,7 @@ class Literal(ASTNode):
 
 class Code(ASTNode):
     """An AST node that is evaluated as Python"""
+
     code = None
     children = ()
     kind = None

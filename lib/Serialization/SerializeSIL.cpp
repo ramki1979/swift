@@ -37,6 +37,7 @@ static unsigned toStableStringEncoding(StringLiteralInst::Encoding encoding) {
   switch (encoding) {
   case StringLiteralInst::Encoding::UTF8: return SIL_UTF8;
   case StringLiteralInst::Encoding::UTF16: return SIL_UTF16;
+  case StringLiteralInst::Encoding::ObjCSelector: return SIL_OBJC_SELECTOR;
   }
   llvm_unreachable("bad string encoding");
 }
@@ -87,7 +88,7 @@ namespace {
                                                     key_type_ref key,
                                                     data_type_ref data) {
       uint32_t keyLength = key.str().size();
-      uint32_t dataLength = sizeof(DeclID);
+      uint32_t dataLength = sizeof(uint32_t);
       endian::Writer<little> writer(out);
       writer.write<uint16_t>(keyLength);
       writer.write<uint16_t>(dataLength);
@@ -100,7 +101,6 @@ namespace {
 
     void EmitData(raw_ostream &out, key_type_ref key, data_type_ref data,
                   unsigned len) {
-      static_assert(sizeof(DeclID) <= 32, "DeclID too large");
       endian::Writer<little>(out).write<uint32_t>(data);
     }
   };
@@ -115,7 +115,7 @@ namespace {
     SmallVector<uint64_t, 64> ScratchRecord;
 
     /// In case we want to encode the relative of InstID vs ValueID.
-    ValueID InstID = 0;
+    uint32_t /*ValueID*/ InstID = 0;
 
     llvm::DenseMap<const ValueBase*, ValueID> ValueIDs;
     ValueID addValueRef(const ValueBase *Val);
@@ -128,25 +128,25 @@ namespace {
     Table FuncTable;
     std::vector<BitOffset> Funcs;
     /// The current function ID.
-    DeclID FuncID = 1;
+    uint32_t /*DeclID*/ NextFuncID = 1;
 
     /// Maps class name to a VTable ID.
     Table VTableList;
     /// Holds the list of VTables.
     std::vector<BitOffset> VTableOffset;
-    DeclID VTableID = 1;
+    uint32_t /*DeclID*/ NextVTableID = 1;
 
     /// Maps global variable name to an ID.
     Table GlobalVarList;
     /// Holds the list of SIL global variables.
     std::vector<BitOffset> GlobalVarOffset;
-    DeclID GlobalVarID = 1;
+    uint32_t /*DeclID*/ NextGlobalVarID = 1;
 
     /// Maps witness table identifier to an ID.
     Table WitnessTableList;
     /// Holds the list of WitnessTables.
     std::vector<BitOffset> WitnessTableOffset;
-    DeclID WitnessTableID = 1;
+    uint32_t /*DeclID*/ NextWitnessTableID = 1;
 
     /// Give each SILBasicBlock a unique ID.
     llvm::DenseMap<const SILBasicBlock*, unsigned> BasicBlockMap;
@@ -224,7 +224,7 @@ void SILSerializer::writeSILFunction(const SILFunction &F, bool DeclOnly) {
   ValueIDs.clear();
   InstID = 0;
 
-  FuncTable[Ctx.getIdentifier(F.getName())] = FuncID++;
+  FuncTable[Ctx.getIdentifier(F.getName())] = NextFuncID++;
   Funcs.push_back(Out.GetCurrentBitNo());
   unsigned abbrCode = SILAbbrCodes[SILFunctionLayout::Code];
   TypeID FnID = S.addTypeRef(F.getLoweredType().getSwiftType());
@@ -1271,7 +1271,7 @@ void SILSerializer::writeSILInstruction(const SILInstruction &SI) {
     // (DeclID + hasOperand), and an operand.
     const EnumInst *UI = cast<EnumInst>(&SI);
     TypeID OperandTy = UI->hasOperand() ?
-      S.addTypeRef(UI->getOperand()->getType().getSwiftRValueType()) : (TypeID)0;
+      S.addTypeRef(UI->getOperand()->getType().getSwiftRValueType()) : TypeID();
     unsigned OperandTyCategory = UI->hasOperand() ?
         (unsigned)UI->getOperand()->getType().getCategory() : 0;
     SILTwoOperandsLayout::emitRecord(Out, ScratchRecord,
@@ -1281,7 +1281,7 @@ void SILSerializer::writeSILInstruction(const SILInstruction &SI) {
         (unsigned)UI->getType().getCategory(),
         S.addDeclRef(UI->getElement()),
         OperandTy, OperandTyCategory,
-        UI->hasOperand() ? addValueRef(UI->getOperand()) : (ValueID)0);
+        UI->hasOperand() ? addValueRef(UI->getOperand()) : ValueID());
     break;
   }
   case ValueKind::WitnessMethodInst: {
@@ -1298,7 +1298,7 @@ void SILSerializer::writeSILInstruction(const SILInstruction &SI) {
     TypeID OperandTy =
         AMI->hasOperand()
             ? S.addTypeRef(AMI->getOperand()->getType().getSwiftRValueType())
-            : (TypeID)0;
+            : TypeID();
     unsigned OperandTyCategory =
         AMI->hasOperand() ? (unsigned)AMI->getOperand()->getType().getCategory()
                           : 0;
@@ -1503,7 +1503,7 @@ void SILSerializer::writeIndexTables() {
 }
 
 void SILSerializer::writeSILGlobalVar(const SILGlobalVariable &g) {
-  GlobalVarList[Ctx.getIdentifier(g.getName())] = GlobalVarID++;
+  GlobalVarList[Ctx.getIdentifier(g.getName())] = NextGlobalVarID++;
   GlobalVarOffset.push_back(Out.GetCurrentBitNo());
   TypeID TyID = S.addTypeRef(g.getLoweredType().getSwiftType());
   DeclID dID = S.addDeclRef(g.getDecl());
@@ -1516,7 +1516,7 @@ void SILSerializer::writeSILGlobalVar(const SILGlobalVariable &g) {
 }
 
 void SILSerializer::writeSILVTable(const SILVTable &vt) {
-  VTableList[vt.getClass()->getName()] = VTableID++;
+  VTableList[vt.getClass()->getName()] = NextVTableID++;
   VTableOffset.push_back(Out.GetCurrentBitNo());
   VTableLayout::emitRecord(Out, ScratchRecord, SILAbbrCodes[VTableLayout::Code],
                            S.addDeclRef(vt.getClass()));
@@ -1535,7 +1535,7 @@ void SILSerializer::writeSILVTable(const SILVTable &vt) {
 }
 
 void SILSerializer::writeSILWitnessTable(const SILWitnessTable &wt) {
-  WitnessTableList[wt.getIdentifier()] = WitnessTableID++;
+  WitnessTableList[wt.getIdentifier()] = NextWitnessTableID++;
   WitnessTableOffset.push_back(Out.GetCurrentBitNo());
 
   WitnessTableLayout::emitRecord(

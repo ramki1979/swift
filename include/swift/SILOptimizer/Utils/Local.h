@@ -69,6 +69,10 @@ recursivelyDeleteTriviallyDeadInstructions(
 /// This routine only examines the state of the instruction at hand.
 bool isInstructionTriviallyDead(SILInstruction *I);
 
+/// \brief Return true if this is a release instruction and the released value
+/// is a part of a guaranteed parameter, false otherwise.
+bool isGuaranteedParamRelease(SILInstruction *I); 
+
 /// \brief Recursively erase all of the uses of the instruction (but not the
 /// instruction itself) and delete instructions that will become trivially
 /// dead when this instruction is removed.
@@ -158,9 +162,13 @@ SILLinkage getSpecializedLinkage(SILFunction *F, SILLinkage L);
 /// string literals. Returns a new instruction if optimization was possible.
 SILInstruction *tryToConcatenateStrings(ApplyInst *AI, SILBuilder &B);
 
-/// Tries to perform jump-threading on a given checked_cast_br terminator.
-bool tryCheckedCastBrJumpThreading(TermInst *Term, DominanceInfo *DT,
-                                   SmallVectorImpl<SILBasicBlock *> &BBs);
+
+/// Tries to perform jump-threading on all checked_cast_br instruction in
+/// function \p Fn.
+bool tryCheckedCastBrJumpThreading(SILFunction *Fn, DominanceInfo *DT,
+                          SmallVectorImpl<SILBasicBlock *> &BlocksForWorklist);
+
+void recalcDomTreeForCCBOpt(DominanceInfo *DT, SILFunction &F);
 
 /// Checks if a symbol with a given linkage can be referenced from fragile
 /// functions.

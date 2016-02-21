@@ -50,7 +50,7 @@ func funcdecl5(a: Int, _ y: Int) {
   funcdecl1(123, 444)
   
   // Calls.
-  4()  // expected-error {{invalid use of '()' to call a value of non-function type 'Int'}} {{4-6=}}
+  4()  // expected-error {{cannot call value of non-function type 'Int'}}
   
   
   // rdar://12017658 - Infer some argument types from func6.
@@ -157,9 +157,6 @@ class ExplicitSelfRequiredTest {
   }
 }
 
-// expected-error@+2 {{Use of 'var' binding here is not allowed}} {{57-60=}}
-// expected-warning@+1 {{'let' keyword is unnecessary; function parameters are immutable by default}} {{64-68=}}
-var testClosureArgumentPatterns: (Int, Int) -> Int = { (var x, let y) in x+y+1 }
 
 class SomeClass {
   var field : SomeClass?

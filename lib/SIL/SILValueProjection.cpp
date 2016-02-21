@@ -37,7 +37,7 @@ void SILValueProjection::print(SILModule *Mod) {
 }
 
 SILValue SILValueProjection::createExtract(SILValue Base,
-                                           const Optional<NewProjectionPath> &Path,
+                                           const Optional<ProjectionPath> &Path,
                                            SILInstruction *Inst,
                                            bool IsValExt) {
   // If we found a projection path, but there are no projections, then the two
@@ -49,6 +49,7 @@ SILValue SILValueProjection::createExtract(SILValue Base,
   // from our list of address projections.
   SILValue LastExtract = Base;
   SILBuilder Builder(Inst);
+  Builder.setCurrentDebugScope(Inst->getFunction()->getDebugScope());
 
   // We use an auto-generated SILLocation for now.
   // TODO: make the sil location more precise.
@@ -94,7 +95,7 @@ SILValue LSValue::reduce(LSLocation &Base, SILModule *M,
   // First, get a list of all the leaf nodes and intermediate nodes for the
   // Base memory location.
   LSLocationList ALocs;
-  const NewProjectionPath &BasePath = Base.getPath().getValue();
+  const ProjectionPath &BasePath = Base.getPath().getValue();
   for (const auto &P : TE->getTypeExpansion(Base.getType(M), M, TEKind::TENode)) {
     ALocs.push_back(LSLocation(Base.getBase(), BasePath, P.getValue()));
   }
@@ -120,7 +121,7 @@ SILValue LSValue::reduce(LSLocation &Base, SILModule *M,
     // empty, keep stripping it.
     auto Iter = FirstLevel.begin();
     LSValue &FirstVal = Values[*Iter];
-    if (FirstLevel.size() == 1 && !FirstVal.hasEmptyNewProjectionPath()) {
+    if (FirstLevel.size() == 1 && !FirstVal.hasEmptyProjectionPath()) {
       Values[*I] = FirstVal.stripLastLevelProjection();
       // We have a value for the parent, remove all the values for children.
       removeLSLocations(Values, FirstLevel);
@@ -142,7 +143,7 @@ SILValue LSValue::reduce(LSLocation &Base, SILModule *M,
     }
 
     if (FirstLevel.size() > 1 && HasIdenticalValueBase && 
-        !FirstVal.hasEmptyNewProjectionPath()) {
+        !FirstVal.hasEmptyProjectionPath()) {
       Values[*I] = FirstVal.stripLastLevelProjection();
       // We have a value for the parent, remove all the values for children.
       removeLSLocations(Values, FirstLevel);
@@ -165,6 +166,7 @@ SILValue LSValue::reduce(LSLocation &Base, SILModule *M,
       Vals.push_back(Values[X].materialize(InsertPt));
     }
     SILBuilder Builder(InsertPt);
+    Builder.setCurrentDebugScope(InsertPt->getFunction()->getDebugScope());
     
     // We use an auto-generated SILLocation for now.
     // TODO: make the sil location more precise.
@@ -174,7 +176,7 @@ SILValue LSValue::reduce(LSLocation &Base, SILModule *M,
             I->getType(M).getObjectType(),
             Vals);
     // This is the Value for the current node.
-    NewProjectionPath P(Base.getType(M));
+    ProjectionPath P(Base.getType(M));
     Values[*I] = LSValue(SILValue(AI.get()), P);
     removeLSLocations(Values, FirstLevel);
 
@@ -236,10 +238,10 @@ bool LSLocation::isNonEscapingLocalLSLocation(SILFunction *Fn,
 void LSLocation::getFirstLevelLSLocations(LSLocationList &Locs,
                                           SILModule *Mod) {
   SILType Ty = getType(Mod);
-  llvm::SmallVector<NewProjection, 8> Out;
-  NewProjection::getFirstLevelProjections(Ty, *Mod, Out);
+  llvm::SmallVector<Projection, 8> Out;
+  Projection::getFirstLevelProjections(Ty, *Mod, Out);
   for (auto &X : Out) {
-    NewProjectionPath P((*Base).getType());
+    ProjectionPath P((*Base).getType());
     P.append(Path.getValue());
     P.append(X);
     Locs.push_back(LSLocation(Base, P));
@@ -254,7 +256,7 @@ void LSLocation::expand(LSLocation Base, SILModule *M, LSLocationList &Locs,
   //
   // Construct the LSLocation by appending the projection path from the
   // accessed node to the leaf nodes.
-  const NewProjectionPath &BasePath = Base.getPath().getValue();
+  const ProjectionPath &BasePath = Base.getPath().getValue();
   for (const auto &P : TE->getTypeExpansion(Base.getType(M), M, TEKind::TELeaf)) {
     Locs.push_back(LSLocation(Base.getBase(), BasePath, P.getValue()));
   }
@@ -265,7 +267,7 @@ void LSLocation::reduce(LSLocation Base, SILModule *M, LSLocationSet &Locs,
   // First, construct the LSLocation by appending the projection path from the
   // accessed node to the leaf nodes.
   LSLocationList Nodes;
-  const NewProjectionPath &BasePath = Base.getPath().getValue();
+  const ProjectionPath &BasePath = Base.getPath().getValue();
   for (const auto &P : TE->getTypeExpansion(Base.getType(M), M, TEKind::TENode)) {
     Nodes.push_back(LSLocation(Base.getBase(), BasePath, P.getValue()));
   }
@@ -304,17 +306,17 @@ void LSLocation::enumerateLSLocation(SILModule *M, SILValue Mem,
                                      LSLocationIndexMap &IndexMap,
                                      LSLocationBaseMap &BaseMap,
                                      TypeExpansionAnalysis *TypeCache) {
+  // We have processed this SILValue before.
+  if (BaseMap.find(Mem) != BaseMap.end())
+    return;
+
   // Construct a Location to represent the memory written by this instruction.
   SILValue UO = getUnderlyingObject(Mem);
-  LSLocation L(UO, NewProjectionPath::getProjectionPath(UO, Mem));
+  LSLocation L(UO, ProjectionPath::getProjectionPath(UO, Mem));
 
   // If we cant figure out the Base or Projection Path for the memory location,
   // simply ignore it for now.
   if (!L.isValid())
-    return;
-
-  // We have processed this SILValue before.
-  if (BaseMap.find(Mem) != BaseMap.end())
     return;
 
   // Record the SILValue to location mapping.

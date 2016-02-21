@@ -11,11 +11,11 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "sil-module"
+#include "swift/Serialization/SerializedSILLoader.h"
+#include "swift/SIL/SILDebugScope.h"
 #include "swift/SIL/SILModule.h"
 #include "Linker.h"
-#include "swift/SIL/SILDebugScope.h"
 #include "swift/SIL/SILVisitor.h"
-#include "swift/Serialization/SerializedSILLoader.h"
 #include "swift/SIL/SILValue.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/SmallString.h"
@@ -122,63 +122,28 @@ SILModule::createWitnessTableDeclaration(ProtocolConformance *C,
   // Extract the base NormalProtocolConformance.
   NormalProtocolConformance *NormalC = C->getRootNormalConformance();
 
-  SILWitnessTable *WT = SILWitnessTable::create(*this,
-                                                linkage,
-                                                NormalC);
-  return WT;
+  return SILWitnessTable::create(*this, linkage, NormalC);
 }
 
-std::pair<SILWitnessTable *, ArrayRef<Substitution>>
-SILModule::
-lookUpWitnessTable(ProtocolConformanceRef C, bool deserializeLazily) {
+SILWitnessTable *
+SILModule::lookUpWitnessTable(ProtocolConformanceRef C, bool deserializeLazily){
   // If we have an abstract conformance passed in (a legal value), just return
   // nullptr.
   if (!C.isConcrete())
-    return {nullptr, {}};
+    return nullptr;
 
   return lookUpWitnessTable(C.getConcrete());
 }
 
-std::pair<SILWitnessTable *, ArrayRef<Substitution>>
-SILModule::
-lookUpWitnessTable(const ProtocolConformance *C, bool deserializeLazily) {
+SILWitnessTable *
+SILModule::lookUpWitnessTable(const ProtocolConformance *C,
+                              bool deserializeLazily) {
   assert(C && "null conformance passed to lookUpWitnessTable");
 
-  // Walk down to the base NormalProtocolConformance.
-  ArrayRef<Substitution> Subs;
-  const ProtocolConformance *ParentC = C;
-  while (!isa<NormalProtocolConformance>(ParentC)) {
-    switch (ParentC->getKind()) {
-    case ProtocolConformanceKind::Normal:
-      llvm_unreachable("should have exited the loop?!");
-    case ProtocolConformanceKind::Inherited:
-      ParentC = cast<InheritedProtocolConformance>(ParentC)
-        ->getInheritedConformance();
-      break;
-    case ProtocolConformanceKind::Specialized: {
-      auto SC = cast<SpecializedProtocolConformance>(ParentC);
-      ParentC = SC->getGenericConformance();
-      assert(Subs.empty() && "multiple conformance specializations?!");
-      Subs = SC->getGenericSubstitutions();
-      break;
-    }
-    }
-  }
-  const NormalProtocolConformance *NormalC
-    = cast<NormalProtocolConformance>(ParentC);
-
-  // If the normal conformance is for a generic type, and we didn't hit a
-  // specialized conformance, collect the substitutions from the generic type.
-  // FIXME: The AST should do this for us.
-  if (NormalC->getType()->isSpecialized() && Subs.empty()) {
-    Subs = NormalC->getType()
-      ->gatherAllSubstitutions(NormalC->getDeclContext()->getParentModule(),
-                               nullptr);
-  }
-
+  const NormalProtocolConformance *NormalC = C->getRootNormalConformance();
   // Attempt to lookup the witness table from the table.
-  auto found = WitnessTableLookupCache.find(NormalC);
-  if (found == WitnessTableLookupCache.end()) {
+  auto found = WitnessTableMap.find(NormalC);
+  if (found == WitnessTableMap.end()) {
 #ifndef NDEBUG
     // Make sure that all witness tables are in the witness table lookup
     // cache.
@@ -192,7 +157,7 @@ lookUpWitnessTable(const ProtocolConformance *C, bool deserializeLazily) {
              "Found witness table that is not"
              " in the witness table lookup cache.");
 #endif
-    return {nullptr, Subs};
+    return nullptr;
   }
 
   SILWitnessTable *wT = found->second;
@@ -201,7 +166,7 @@ lookUpWitnessTable(const ProtocolConformance *C, bool deserializeLazily) {
 
   // If we have a definition, return it.
   if (wT->isDefinition())
-    return {wT, Subs};
+    return wT;
 
   // Otherwise try to deserialize it. If we succeed return the deserialized
   // function.
@@ -210,10 +175,38 @@ lookUpWitnessTable(const ProtocolConformance *C, bool deserializeLazily) {
   // on that behavior for now.
   if (deserializeLazily)
     if (auto deserializedTable = getSILLoader()->lookupWitnessTable(wT))
-      return {deserializedTable, Subs};
+      return deserializedTable;
 
   // If we fail, just return the declaration.
-  return {wT, Subs};
+  return wT;
+}
+
+SILDefaultWitnessTable *
+SILModule::lookUpDefaultWitnessTable(const ProtocolDecl *Protocol) {
+  // Note: we only ever look up default witness tables in the translation unit
+  // that is currently being compiled, since they SILGen generates them when it
+  // visits the protocol declaration, and IRGen emits them when emitting the
+  // protocol descriptor metadata for the protocol.
+
+  auto found = DefaultWitnessTableMap.find(Protocol);
+  if (found == DefaultWitnessTableMap.end()) {
+    assert(Protocol->hasFixedLayout() &&
+           "Resilient protocol must have a default witness table");
+    return nullptr;
+  }
+
+  assert(!Protocol->hasFixedLayout() &&
+         "Fixed-layout protocol cannot have a default witness table");
+
+  return found->second;
+}
+
+SILDefaultWitnessTable *
+SILModule::createDefaultWitnessTableDeclaration(const ProtocolDecl *Protocol) {
+  assert(!Protocol->hasFixedLayout() &&
+         "Fixed-layout protocol cannot have a default witness table");
+
+  return SILDefaultWitnessTable::create(*this, Protocol);
 }
 
 SILFunction *SILModule::getOrCreateFunction(SILLocation loc,
@@ -256,7 +249,7 @@ static SILFunction::ClassVisibility_t getClassVisibility(SILDeclRef constant) {
   if (context->isExtensionContext())
     return SILFunction::NotRelevant;
 
-  auto *classType = context->isClassOrClassExtensionContext();
+  auto *classType = context->getAsClassOrClassExtensionContext();
   if (!classType || classType->isFinal())
     return SILFunction::NotRelevant;
 
@@ -487,6 +480,13 @@ void SILModule::invalidateSILLoaderCaches() {
   getSILLoader()->invalidateCaches();
 }
 
+void SILModule::removeFromZombieList(StringRef Name) {
+  if (auto *Zombie = ZombieFunctionTable.lookup(Name)) {
+    ZombieFunctionTable.erase(Name);
+    zombieFunctions.remove(Zombie);
+  }
+}
+
 /// Erase a function from the module.
 void SILModule::eraseFunction(SILFunction *F) {
 
@@ -504,6 +504,7 @@ void SILModule::eraseFunction(SILFunction *F) {
     // or vtable stub generation. So we move it into the zombie list.
     getFunctionList().remove(F);
     zombieFunctions.push_back(F);
+    ZombieFunctionTable[copiedName] = F;
     F->setZombie();
 
     // This opens dead-function-removal opportunities for called functions.
@@ -517,7 +518,7 @@ void SILModule::eraseFunction(SILFunction *F) {
 
 /// Erase a global SIL variable from the module.
 void SILModule::eraseGlobalVariable(SILGlobalVariable *G) {
-  GlobalVariableTable.erase(G->getName());
+  GlobalVariableMap.erase(G->getName());
   getSILGlobalList().erase(G);
 }
 
@@ -526,8 +527,8 @@ SILVTable *SILModule::lookUpVTable(const ClassDecl *C) {
     return nullptr;
 
   // First try to look up R from the lookup table.
-  auto R = VTableLookupTable.find(C);
-  if (R != VTableLookupTable.end())
+  auto R = VTableMap.find(C);
+  if (R != VTableMap.end())
     return R->second;
 
   // If that fails, try to deserialize it. If that fails, return nullptr.
@@ -538,7 +539,7 @@ SILVTable *SILModule::lookUpVTable(const ClassDecl *C) {
     return nullptr;
 
   // If we succeeded, map C -> VTbl in the table and return VTbl.
-  VTableLookupTable[C] = Vtbl;
+  VTableMap[C] = Vtbl;
   return Vtbl;
 }
 
@@ -551,6 +552,47 @@ SerializedSILLoader *SILModule::getSILLoader() {
   return SILLoader.get();
 }
 
+static ArrayRef<Substitution>
+getSubstitutionsForProtocolConformance(ProtocolConformanceRef CRef) {
+  if (CRef.isAbstract())
+    return {};
+  
+  auto C = CRef.getConcrete();
+
+  // Walk down to the base NormalProtocolConformance.
+  ArrayRef<Substitution> Subs;
+  const ProtocolConformance *ParentC = C;
+  while (!isa<NormalProtocolConformance>(ParentC)) {
+    switch (ParentC->getKind()) {
+    case ProtocolConformanceKind::Normal:
+      llvm_unreachable("should have exited the loop?!");
+    case ProtocolConformanceKind::Inherited:
+      ParentC = cast<InheritedProtocolConformance>(ParentC)
+        ->getInheritedConformance();
+      break;
+    case ProtocolConformanceKind::Specialized: {
+      auto SC = cast<SpecializedProtocolConformance>(ParentC);
+      ParentC = SC->getGenericConformance();
+      assert(Subs.empty() && "multiple conformance specializations?!");
+      Subs = SC->getGenericSubstitutions();
+      break;
+    }
+    }
+  }
+  const NormalProtocolConformance *NormalC
+    = cast<NormalProtocolConformance>(ParentC);
+
+  // If the normal conformance is for a generic type, and we didn't hit a
+  // specialized conformance, collect the substitutions from the generic type.
+  // FIXME: The AST should do this for us.
+  if (NormalC->getType()->isSpecialized() && Subs.empty()) {
+    Subs = NormalC->getType()
+      ->gatherAllSubstitutions(NormalC->getDeclContext()->getParentModule(),
+                               nullptr);
+  }
+  
+  return Subs;
+}
 
 /// \brief Given a protocol \p Proto, a member method \p Member and a concrete
 /// class type \p ConcreteTy, search the witness tables and return the static
@@ -565,14 +607,14 @@ SILModule::lookUpFunctionInWitnessTable(ProtocolConformanceRef C,
   auto Ret = lookUpWitnessTable(C);
 
   // If no witness table was found, bail.
-  if (!Ret.first) {
+  if (!Ret) {
     DEBUG(llvm::dbgs() << "        Failed speculative lookup of witness for: ";
           C.dump(); Member.dump());
     return std::make_tuple(nullptr, nullptr, ArrayRef<Substitution>());
   }
 
   // Okay, we found the correct witness table. Now look for the method.
-  for (auto &Entry : Ret.first->getEntries()) {
+  for (auto &Entry : Ret->getEntries()) {
     // Look at method entries only.
     if (Entry.getKind() != SILWitnessTable::WitnessKind::Method)
       continue;
@@ -582,7 +624,8 @@ SILModule::lookUpFunctionInWitnessTable(ProtocolConformanceRef C,
     if (MethodEntry.Requirement != Member)
       continue;
 
-    return std::make_tuple(MethodEntry.Witness, Ret.first, Ret.second);
+    return std::make_tuple(MethodEntry.Witness, Ret,
+                           getSubstitutionsForProtocolConformance(C));
   }
 
   return std::make_tuple(nullptr, nullptr, ArrayRef<Substitution>());

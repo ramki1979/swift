@@ -1184,9 +1184,9 @@ void PatternMatchEmission::bindVariable(SILLocation loc, VarDecl *var,
 
   RValue rv(SGF, loc, formalValueType, value.getFinalManagedValue());
   if (shouldTake(value, isIrrefutable)) {
-    std::move(rv).forwardInto(SGF, init.get(), loc);
+    std::move(rv).forwardInto(SGF, loc, init.get());
   } else {
-    std::move(rv).copyInto(SGF, init.get(), loc);
+    std::move(rv).copyInto(SGF, loc, init.get());
   }
 }
 
@@ -1467,7 +1467,8 @@ emitNominalTypeDispatch(ArrayRef<RowToSpecialize> rows,
                                              firstMatcher->getType(),
                                              // TODO: Avoid copies on
                                              // address-only types.
-                                             SGFContext());
+                                             SGFContext())
+      .getAsSingleValue(SGF, loc);
     destructured.push_back(ConsumableManagedValue::forOwned(val));
   }
 
@@ -1567,7 +1568,9 @@ void PatternMatchEmission::emitIsDispatch(ArrayRef<RowToSpecialize> rows,
                                       const FailureHandler &failure) {
   CanType sourceType = rows[0].Pattern->getType()->getCanonicalType();
   CanType targetType = getTargetType(rows[0]);
-  
+
+  SGF.checkForImportedUsedConformances(targetType);
+
   // Make any abstraction modifications necessary for casting.
   SmallVector<ConsumableManagedValue, 4> borrowedValues;
   ConsumableManagedValue operand =

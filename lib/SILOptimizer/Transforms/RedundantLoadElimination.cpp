@@ -155,30 +155,6 @@ static bool isRLEInertInstruction(SILInstruction *Inst) {
   }
 }
 
-/// Returns true if the given basic block is reachable from the entry block.
-///
-/// TODO: this is very inefficient, can we make use of the domtree.
-static bool isReachable(SILBasicBlock *Block) {
-  SmallPtrSet<SILBasicBlock *, 16> Visited;
-  llvm::SmallVector<SILBasicBlock *, 16> Worklist;
-  SILBasicBlock *EntryBB = &*Block->getParent()->begin();
-  Worklist.push_back(EntryBB);
-  Visited.insert(EntryBB);
-
-  while (!Worklist.empty()) {
-    auto *CurBB = Worklist.back();
-    Worklist.pop_back();
-
-    if (CurBB == Block)
-      return true;
-
-    for (auto &Succ : CurBB->getSuccessors())
-      if (!Visited.insert(Succ).second)
-        Worklist.push_back(Succ);
-  }
-  return false;
-}
-
 //===----------------------------------------------------------------------===//
 //                       Basic Block Location State
 //===----------------------------------------------------------------------===//
@@ -228,7 +204,7 @@ private:
   llvm::SmallBitVector ForwardSetOut;
 
   /// A bit vector for which the ith bit represents the ith LSLocation in
-  /// LocationVault. If we ignore all unknown write, whats the maximum set
+  /// LocationVault. If we ignore all unknown write, what's the maximum set
   /// of available locations at the current position in the basic block.
   llvm::SmallBitVector ForwardSetMax;
 
@@ -324,7 +300,9 @@ public:
     ForwardSetIn.resize(LocationNum, false);
     ForwardSetOut.resize(LocationNum, optimistic);
 
-    ForwardSetMax.resize(LocationNum, true);
+    // If we are running an optimistic data flow, set forward max to true
+    // initially.
+    ForwardSetMax.resize(LocationNum, optimistic);
 
     BBGenSet.resize(LocationNum, false);
     BBKillSet.resize(LocationNum, false);
@@ -454,7 +432,7 @@ private:
 
   /// Contains a map between LSLocation to their index in the LocationVault.
   /// Use for fast lookup.
-  llvm::DenseMap<LSLocation, unsigned> LocToBitIndex;
+  LSLocationIndexMap LocToBitIndex;
 
   /// Keeps a map between the accessed SILValue and the location.
   LSLocationBaseMap BaseToLocIndex;
@@ -469,7 +447,17 @@ private:
   llvm::DenseMap<LSValue, unsigned> ValToBitIndex;
 
   /// A map from each BasicBlock to its BlockState.
-  llvm::SmallDenseMap<SILBasicBlock *, BlockState, 4> BBToLocState;
+  llvm::SmallDenseMap<SILBasicBlock *, BlockState, 16> BBToLocState;
+
+  /// Keeps a list of basic blocks that have LoadInsts. If a basic block does
+  /// not have LoadInst, we do not actually perform the last iteration where
+  /// RLE is actually performed on the basic block.
+  ///
+  /// NOTE: This is never populated for functions which will only require 1
+  /// data flow iteration. For function that requires more than 1 iteration of
+  /// the data flow this is populated when the first time the functions is
+  /// walked, i.e. when the we generate the genset and killset.
+  llvm::DenseSet<SILBasicBlock *> BBWithLoads;
 
 public:
   RLEContext(SILFunction *F, SILPassManager *PM, AliasAnalysis *AA,
@@ -500,7 +488,7 @@ public:
   void processBasicBlocksForAvailValue();
 
   /// Process basic blocks to perform the redundant load elimination.
-  void processBasicBlocksForRLE();
+  void processBasicBlocksForRLE(bool Optimistic);
 
   /// Returns the alias analysis we will use during all computations.
   AliasAnalysis *getAA() const { return AA; }
@@ -667,7 +655,7 @@ bool BlockState::setupRLE(RLEContext &Ctx, SILInstruction *I, SILValue Mem) {
     L = BaseToLocIndex[Mem];
   } else {
     SILValue UO = getUnderlyingObject(Mem);
-    L = LSLocation(UO, NewProjectionPath::getProjectionPath(UO, Mem));
+    L = LSLocation(UO, ProjectionPath::getProjectionPath(UO, Mem));
   }
 
   LSLocationValueMap Values;
@@ -799,7 +787,7 @@ void BlockState::processWrite(RLEContext &Ctx, SILInstruction *I, SILValue Mem,
     L = BaseToLocIndex[Mem];
   } else {
     SILValue UO = getUnderlyingObject(Mem);
-    L = LSLocation(UO, NewProjectionPath::getProjectionPath(UO, Mem));
+    L = LSLocation(UO, ProjectionPath::getProjectionPath(UO, Mem));
   }
 
   // If we cant figure out the Base or Projection Path for the write,
@@ -856,7 +844,7 @@ void BlockState::processRead(RLEContext &Ctx, SILInstruction *I, SILValue Mem,
     L = BaseToLocIndex[Mem];
   } else {
     SILValue UO = getUnderlyingObject(Mem);
-    L = LSLocation(UO, NewProjectionPath::getProjectionPath(UO, Mem));
+    L = LSLocation(UO, ProjectionPath::getProjectionPath(UO, Mem));
   }
 
   // If we cant figure out the Base or Projection Path for the read, simply
@@ -957,6 +945,11 @@ void BlockState::processUnknownWriteInstForRLE(RLEContext &Ctx,
 
 void BlockState::processUnknownWriteInst(RLEContext &Ctx, SILInstruction *I,
                                          RLEKind Kind) {
+  // If this is a release on a guaranteed parameter, it can not call deinit,
+  // which might read or write memory.
+  if (isGuaranteedParamRelease(I))
+    return;
+
   // Are we computing the genset and killset ?
   if (isComputeAvailGenKillSet(Kind)) {
     processUnknownWriteInstForGenKillSet(Ctx, I);
@@ -1240,6 +1233,8 @@ void RLEContext::processBasicBlocksForGenKillSet() {
     // point in the basic block.
     for (auto I = BB->begin(), E = BB->end(); I != E; ++I) {
       if (auto *LI = dyn_cast<LoadInst>(&*I)) {
+        if (BBWithLoads.find(BB) == BBWithLoads.end())
+          BBWithLoads.insert(BB);
         S.processLoadInst(*this, LI, RLEKind::ComputeAvailSetMax);
       }
       if (auto *SI = dyn_cast<StoreInst>(&*I)) {
@@ -1306,8 +1301,16 @@ void RLEContext::processBasicBlocksForAvailValue() {
   }
 }
 
-void RLEContext::processBasicBlocksForRLE() {
+void RLEContext::processBasicBlocksForRLE(bool Optimistic) {
   for (SILBasicBlock *BB : PO->getReversePostOrder()) {
+    // If we know this is not a one iteration function which means its
+    // forward sets have been computed and converged, 
+    // and this basic block does not even have LoadInsts, there is no point
+    // in processing every instruction in the basic block again as no store
+    // will be eliminated. 
+    if (Optimistic && BBWithLoads.find(BB) == BBWithLoads.end())
+      continue;
+
     BlockState &Forwarder = getBlockState(BB);
 
     // Merge the predecessors. After merging, BlockState now contains
@@ -1317,6 +1320,11 @@ void RLEContext::processBasicBlocksForRLE() {
 
     // Perform the actual redundant load elimination.
     Forwarder.processBasicBlockWithKind(*this, RLEKind::PerformRLE);
+
+    // If this is not a one iteration data flow, then the forward sets
+    // have been computed.
+    if (Optimistic)
+      continue;
 
     // Update the locations with available values and their values.
     Forwarder.updateForwardSetOut();
@@ -1366,23 +1374,30 @@ bool RLEContext::run() {
     return false;
 
   // Do we run a multi-iteration data flow ?
-  bool MultiIteration = Kind == ProcessKind::ProcessMultipleIterations ?
+  bool Optimistic = Kind == ProcessKind::ProcessMultipleIterations ?
                         true : false;
+
+  // These are a list of basic blocks that we actually processed.
+  // We do not process unreachable block, instead we set their liveouts to nil.
+  llvm::DenseSet<SILBasicBlock *> BBToProcess;
+  for (auto X : PO->getPostOrder()) 
+    BBToProcess.insert(X);
 
   // For all basic blocks in the function, initialize a BB state. Since we
   // know all the locations accessed in this function, we can resize the bit
   // vector to the appropriate size.
   for (auto &B : *Fn) {
     BBToLocState[&B] = BlockState();
-    BBToLocState[&B].init(&B, LocationVault.size(), MultiIteration && isReachable(&B));
+    BBToLocState[&B].init(&B, LocationVault.size(), Optimistic &&
+                          BBToProcess.find(&B) != BBToProcess.end());
   }
 
-  if (MultiIteration)
+  if (Optimistic)
     runIterativeRLE();
 
   // We have the available value bit computed and the local forwarding value.
   // Set up the load forwarding.
-  processBasicBlocksForRLE();
+  processBasicBlocksForRLE(Optimistic);
 
   // Finally, perform the redundant load replacements.
   llvm::DenseSet<SILInstruction *> InstsToDelete;

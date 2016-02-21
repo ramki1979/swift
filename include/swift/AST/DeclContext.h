@@ -240,27 +240,27 @@ public:
 
   /// If this DeclContext is a nominal type declaration or an
   /// extension thereof, return the nominal type declaration.
-  NominalTypeDecl *isNominalTypeOrNominalTypeExtensionContext() const;
+  NominalTypeDecl *getAsNominalTypeOrNominalTypeExtensionContext() const;
 
   /// If this DeclContext is a class, or an extension on a class, return the
   /// ClassDecl, otherwise return null.
-  ClassDecl *isClassOrClassExtensionContext() const;
+  ClassDecl *getAsClassOrClassExtensionContext() const;
 
   /// If this DeclContext is an enum, or an extension on an enum, return the
   /// EnumDecl, otherwise return null.
-  EnumDecl *isEnumOrEnumExtensionContext() const;
+  EnumDecl *getAsEnumOrEnumExtensionContext() const;
 
   /// If this DeclContext is a protocol, or an extension on a
   /// protocol, return the ProtocolDecl, otherwise return null.
-  ProtocolDecl *isProtocolOrProtocolExtensionContext() const;
+  ProtocolDecl *getAsProtocolOrProtocolExtensionContext() const;
 
   /// If this DeclContext is a protocol extension, return the extended protocol.
-  ProtocolDecl *isProtocolExtensionContext() const;
+  ProtocolDecl *getAsProtocolExtensionContext() const;
 
   /// \brief Retrieve the generic parameter 'Self' from a protocol or
   /// protocol extension.
   ///
-  /// Only valid if \c isProtocolOrProtocolExtensionContext().
+  /// Only valid if \c getAsProtocolOrProtocolExtensionContext().
   GenericTypeParamDecl *getProtocolSelf() const;
 
   /// getDeclaredTypeOfContext - For a type context, retrieves the declared
@@ -405,6 +405,12 @@ public:
                        LazyResolver *typeResolver,
                        SmallVectorImpl<ValueDecl *> &decls) const;
 
+  /// Look up all Objective-C methods with the given selector visible
+  /// in the enclosing module.
+  void lookupAllObjCMethods(
+         ObjCSelector selector,
+         SmallVectorImpl<AbstractFunctionDecl *> &results) const;
+
   /// Return the ASTContext for a specified DeclContext by
   /// walking up to the enclosing module and returning its ASTContext.
   ASTContext &getASTContext() const;
@@ -457,6 +463,13 @@ public:
 
   void dumpContext() const;
   unsigned printContext(llvm::raw_ostream &OS, unsigned indent = 0) const;
+  
+  /// Get the type of `self` in this declaration context, if there is a
+  /// `self`.
+  Type getSelfTypeInContext() const;
+  /// Get the interface type of `self` in this declaration context, if there is
+  /// a `self`.
+  Type getSelfInterfaceType() const;
   
   // Only allow allocation of DeclContext using the allocator in ASTContext.
   void *operator new(size_t Bytes, ASTContext &C,

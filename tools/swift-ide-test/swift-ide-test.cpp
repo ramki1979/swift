@@ -210,7 +210,7 @@ InputFilenames(llvm::cl::Positional, llvm::cl::desc("[input files...]"),
                llvm::cl::ZeroOrMore);
 
 static llvm::cl::list<std::string>
-BuildConfigs("D", llvm::cl::desc("Build configurations"));
+BuildConfigs("D", llvm::cl::desc("Conditional compilation flags"));
 
 static llvm::cl::opt<std::string>
 SDK("sdk", llvm::cl::desc("path to the SDK to build against"));
@@ -293,6 +293,11 @@ static llvm::cl::opt<bool>
 OmitNeedlessWords("enable-omit-needless-words",
                    llvm::cl::desc("Omit needless words when importing Objective-C names"),
                    llvm::cl::init(false));
+
+static llvm::cl::opt<bool>
+StripNSPrefix("enable-strip-ns-prefix",
+              llvm::cl::desc("Strip the NS prefix from Foundation et al"),
+              llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 DisableObjCAttrRequiresFoundationModule(
@@ -386,6 +391,10 @@ static llvm::cl::list<std::string>
 ModuleToPrint("module-to-print",
               llvm::cl::desc("Name of the module to print"));
 
+static llvm::cl::list<std::string>
+ModuleGroupToPrint("module-group",
+                   llvm::cl::desc("Name of the module group to print"));
+
 static llvm::cl::opt<bool>
 ModulePrintSubmodules("module-print-submodules",
                       llvm::cl::desc("Recursively print submodules"),
@@ -462,6 +471,11 @@ AccessibilityFilter(
         clEnumValEnd));
 
 static llvm::cl::opt<bool>
+SynthesizeExtension("synthesize-extension",
+                    llvm::cl::desc("Print synthesized extensions from conforming protocols."),
+                    llvm::cl::init(false));
+
+static llvm::cl::opt<bool>
 SkipPrivateStdlibDecls("skip-private-stdlib-decls",
                 llvm::cl::desc("Don't print declarations that start with '_'"),
                 llvm::cl::init(false));
@@ -470,6 +484,11 @@ static llvm::cl::opt<bool>
 SkipUnderscoredStdlibProtocols("skip-underscored-stdlib-protocols",
                 llvm::cl::desc("Don't print protocols that start with '_'"),
                 llvm::cl::init(false));
+
+static llvm::cl::opt<bool>
+SkipDocumentationComments("skip-print-doc-comments",
+             llvm::cl::desc("Don't print documentation comments from clang module headers"),
+             llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 PrintRegularComments("print-regular-comments",
@@ -1549,11 +1568,21 @@ public:
   void printDeclLoc(const Decl *D) override {
     OS << "<loc>";
   }
-  void printDeclNameEndLoc(const Decl *D) override {
+  void printDeclNameOrSignatureEndLoc(const Decl *D) override {
     OS << "</loc>";
   }
   void printDeclPost(const Decl *D) override {
     OS << "</decl>";
+  }
+
+  void printSynthesizedExtensionPre(const ExtensionDecl *ED,
+                                    const NominalTypeDecl *NTD) override {
+    OS << "<synthesized>";
+  }
+
+  void printSynthesizedExtensionPost(const ExtensionDecl *ED,
+                                     const NominalTypeDecl *NTD) override {
+    OS << "</synthesized>";
   }
 
   void printTypeRef(const TypeDecl *TD, Identifier Name) override {
@@ -1571,9 +1600,11 @@ public:
 
 static int doPrintModules(const CompilerInvocation &InitInvok,
                           const std::vector<std::string> ModulesToPrint,
+                          const std::vector<std::string> GroupsToPrint,
                           ide::ModuleTraversalOptions TraversalOptions,
                           const PrintOptions &Options,
-                          bool AnnotatePrint) {
+                          bool AnnotatePrint,
+                          bool SynthesizeExtensions) {
   CompilerInvocation Invocation(InitInvok);
 
   CompilerInstance CI;
@@ -1632,8 +1663,13 @@ static int doPrintModules(const CompilerInvocation &InitInvok,
         continue;
       }
     }
+    std::vector<StringRef> GroupNames;
+    for (StringRef G : GroupsToPrint) {
+      GroupNames.push_back(G);
+    }
 
-    printSubmoduleInterface(M, ModuleName, TraversalOptions, *Printer, Options);
+    printSubmoduleInterface(M, ModuleName, GroupNames, TraversalOptions,
+                            *Printer, Options, SynthesizeExtensions);
   }
 
   return ExitCode;
@@ -2474,6 +2510,7 @@ int main(int argc, char *argv[]) {
   InitInvok.getLangOptions().Swift3Migration |= options::Swift3Migration;
   InitInvok.getLangOptions().OmitNeedlessWords |=
     options::OmitNeedlessWords;
+  InitInvok.getLangOptions().StripNSPrefix |= options::StripNSPrefix;
   InitInvok.getClangImporterOptions().ImportForwardDeclarations |=
     options::ObjCForwardDeclarations;
   InitInvok.getClangImporterOptions().OmitNeedlessWords |=
@@ -2495,7 +2532,7 @@ int main(int argc, char *argv[]) {
     !options::DisableObjCAttrRequiresFoundationModule;
 
   for (auto ConfigName : options::BuildConfigs)
-    InitInvok.getLangOptions().addBuildConfigOption(ConfigName);
+    InitInvok.getLangOptions().addCustomConditionalCompilationFlag(ConfigName);
 
   // Process the clang arguments last and allow them to override previously
   // set options.
@@ -2525,6 +2562,7 @@ int main(int argc, char *argv[]) {
     PrintOpts.PrintImplicitAttrs = options::PrintImplicitAttrs;
     PrintOpts.PrintAccessibility = options::PrintAccessibility;
     PrintOpts.AccessibilityFilter = options::AccessibilityFilter;
+    PrintOpts.PrintDocumentationComments = !options::SkipDocumentationComments;
     PrintOpts.PrintRegularClangComments = options::PrintRegularComments;
     PrintOpts.SkipPrivateStdlibDecls = options::SkipPrivateStdlibDecls;
     PrintOpts.SkipUnavailable = options::SkipUnavailable;
@@ -2625,8 +2663,9 @@ int main(int argc, char *argv[]) {
       TraversalOptions |= ide::ModuleTraversal::SkipOverlay;
 
     ExitCode = doPrintModules(
-        InitInvok, options::ModuleToPrint, TraversalOptions, PrintOpts,
-        options::AnnotatePrint);
+        InitInvok, options::ModuleToPrint, options::ModuleGroupToPrint,
+        TraversalOptions, PrintOpts, options::AnnotatePrint,
+        options::SynthesizeExtension);
     break;
   }
 

@@ -215,6 +215,8 @@ public:
   void visitExtensionDecl(ExtensionDecl *ed);
   void visitVarDecl(VarDecl *vd);
 
+  void emitPropertyBehavior(VarDecl *vd);
+
   void emitAbstractFuncDecl(AbstractFunctionDecl *AFD);
   
   /// Generate code for a source file of the module.
@@ -298,6 +300,9 @@ public:
                                    IsFreeFunctionWitness_t isFree,
                                    ArrayRef<Substitution> witnessSubs);
 
+  /// Emit the default witness table for a resilient protocol.
+  void emitDefaultWitnessTable(ProtocolDecl *protocol);
+
   /// Emit the lazy initializer function for a global pattern binding
   /// declaration.
   SILFunction *emitLazyGlobalInitializer(StringRef funcName,
@@ -367,6 +372,12 @@ public:
 
   /// Mark protocol conformances from the given set of substitutions as used.
   void useConformancesFromSubstitutions(ArrayRef<Substitution> subs);
+
+  /// Substitute the `Self` type from a protocol conformance into a protocol
+  /// requirement's type to get the type of the witness.
+  CanAnyFunctionType
+  substSelfTypeIntoProtocolRequirementType(CanGenericFunctionType reqtTy,
+                                           ProtocolConformance *conformance);
 
 private:
   /// Emit the deallocator for a class that uses the objc allocator.

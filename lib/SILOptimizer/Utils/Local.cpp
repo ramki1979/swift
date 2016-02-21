@@ -41,7 +41,7 @@ swift::isInstructionTriviallyDead(SILInstruction *I) {
       I->getModule().getOptions().Optimization <= SILOptions::SILOptMode::None)
     return false;
 
-  if (!hasNoUsesExceptDebug(I) || isa<TermInst>(I))
+  if (!onlyHaveDebugUses(I) || isa<TermInst>(I))
     return false;
 
   if (auto *BI = dyn_cast<BuiltinInst>(I)) {
@@ -70,6 +70,21 @@ swift::isInstructionTriviallyDead(SILInstruction *I) {
     return true;
 
   return false;
+}
+
+/// \brief Return true if this is a release instruction and the released value
+/// is a part of a guaranteed parameter.
+bool swift::isGuaranteedParamRelease(SILInstruction *I) {
+  if (!isa<StrongReleaseInst>(I) || !isa<ReleaseValueInst>(I))
+    return false;
+  // OK. we have a release instruction.
+  // Check whether this is a release on part of a guaranteed function argument.
+  SILValue Op = stripValueProjections(I->getOperand(0));
+  SILArgument *Arg = dyn_cast<SILArgument>(Op);
+  if (!Arg || !Arg->isFunctionArg() ||
+      !Arg->hasConvention(SILArgumentConvention::Direct_Guaranteed))
+    return false;
+  return true;
 }
 
 namespace {
@@ -879,7 +894,7 @@ SILInstruction *StringConcatenationOptimizer::optimize() {
   Arguments.push_back(FuncResultType);
 
   auto FnTy = FRIConvertFromBuiltin->getType();
-  auto STResultType = FnTy.castTo<SILFunctionType>()->getResult().getSILType();
+  auto STResultType = FnTy.castTo<SILFunctionType>()->getSILResult();
   return Builder.createApply(AI->getLoc(), FRIConvertFromBuiltin, FnTy,
                              STResultType, ArrayRef<Substitution>(), Arguments,
                              false);
@@ -1272,8 +1287,7 @@ optimizeBridgedObjCToSwiftCast(SILInstruction *Inst,
 
   auto *Conformance = Conf.getPointer();
 
-  auto ParamTypes = BridgedFunc->getLoweredFunctionType()
-                               ->getParametersWithoutIndirectResult();
+  auto ParamTypes = BridgedFunc->getLoweredFunctionType()->getParameters();
 
   auto *FuncRef = Builder.createFunctionRef(Loc, BridgedFunc);
 
@@ -1471,8 +1485,7 @@ optimizeBridgedSwiftToObjCCast(SILInstruction *Inst,
         BridgedFunc->isExternalDeclaration()))
     return nullptr;
 
-  auto ParamTypes = BridgedFunc->getLoweredFunctionType()
-                               ->getParametersWithoutIndirectResult();
+  auto ParamTypes = BridgedFunc->getLoweredFunctionType()->getParameters();
 
   auto SILFnTy = SILType::getPrimitiveObjectType(
       M.Types.getConstantFunctionType(BridgeFuncDeclRef));

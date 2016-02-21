@@ -683,11 +683,8 @@ namespace {
       // Type check the type parameters in an UnresolvedSpecializeExpr.
       if (auto us = dyn_cast<UnresolvedSpecializeExpr>(expr)) {
         for (TypeLoc &type : us->getUnresolvedParams()) {
-          if (TC.validateType(type, DC)) {
-            TC.diagnose(us->getLAngleLoc(),
-                        diag::while_parsing_as_left_angle_bracket);
+          if (TC.validateType(type, DC))
             return nullptr;
-          }
         }
         
         // If this is a reference type a specialized type, form a TypeExpr.
@@ -1144,6 +1141,14 @@ solveForExpression(Expr *&expr, DeclContext *dc, Type convertType,
     auto constraintKind = ConstraintKind::Conversion;
     if (cs.getContextualTypePurpose() == CTP_CallArgument)
       constraintKind = ConstraintKind::ArgumentConversion;
+      
+    if (allowFreeTypeVariables == FreeTypeVariableBinding::UnresolvedType) {
+      convertType = convertType.transform([&](Type type) -> Type {
+        if (type->is<UnresolvedType>())
+          return cs.createTypeVariable(cs.getConstraintLocator(expr), 0);
+        return type;
+      });
+    }
     
     cs.addConstraint(constraintKind, expr->getType(), convertType,
                      cs.getConstraintLocator(expr), /*isFavored*/ true);
@@ -1321,7 +1326,7 @@ bool TypeChecker::typeCheckExpression(Expr *&expr, DeclContext *dc,
   // check for them now.  We cannot apply the solution with unresolved TypeVars,
   // because they will leak out into arbitrary places in the resultant AST.
   if (options.contains(TypeCheckExprFlags::AllowUnresolvedTypeVariables) &&
-      viable.size() != 1) {
+      (viable.size() != 1 || (convertType && convertType->hasUnresolvedType()))) {
     expr->setType(ErrorType::get(Context));
     return false;
   }
@@ -1629,6 +1634,10 @@ bool TypeChecker::typeCheckBinding(Pattern *&pattern, Expr *&initializer,
   if (pattern->hasType()) {
     contextualType = pattern->getType();
     contextualPurpose = CTP_Initialization;
+
+    // If we already had an error, don't repeat the problem.
+    if (contextualType->is<ErrorType>())
+      return true;
   }
     
   // Type-check the initializer.
@@ -1870,7 +1879,7 @@ Type ConstraintSystem::computeAssignDestType(Expr *dest, SourceLoc equalLoc) {
   }
 
   Type destTy = simplifyType(dest->getType());
-  if (destTy->is<ErrorType>())
+  if (destTy->is<ErrorType>() || destTy->getRValueType()->is<UnresolvedType>())
     return Type();
 
   // If we have already resolved a concrete lvalue destination type, return it.

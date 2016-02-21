@@ -1,14 +1,12 @@
 ##===--------------------------------------------------*- coding: utf-8 -*-===##
-##
-## This source file is part of the Swift.org open source project
-##
-## Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
-## Licensed under Apache License v2.0 with Runtime Library Exception
-##
-## See http://swift.org/LICENSE.txt for license information
-## See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
-##
-##===----------------------------------------------------------------------===##
+#
+# This source file is part of the Swift.org open source project
+#
+# Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+# Licensed under Apache License v2.0 with Runtime Library Exception
+#
+# See http://swift.org/LICENSE.txt for license information
+# See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 
 import re
 import codecs
@@ -237,7 +235,6 @@ class UnicodeTrieGenerator(object):
 
         Don't change parameter values after calling this method.
         """
-
         self.BMP_data_offset_bits = 16 - self.BMP_first_level_index_bits
 
         self.supp_data_offset_bits = \
@@ -321,9 +318,7 @@ class UnicodeTrieGenerator(object):
         """Compress internal trie representation.
 
         Don't mutate the trie after calling this method.
-
         """
-
         def remap_indexes(indexes, old_idx, new_idx):
             def map_index(idx):
                 if idx == old_idx:

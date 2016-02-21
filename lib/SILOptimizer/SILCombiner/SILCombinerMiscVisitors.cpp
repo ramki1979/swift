@@ -406,8 +406,7 @@ SILInstruction *SILCombiner::visitLoadInst(LoadInst *LI) {
     if (!isa<StructExtractInst>(User) && !isa<TupleExtractInst>(User))
       return nullptr;
 
-    auto P = Projection::valueProjectionForInstruction(User);
-    Projections.push_back({P.getValue(), User});
+    Projections.push_back({Projection(User), User});
   }
 
   // The reason why we sort the list is so that we will process projections with
@@ -433,7 +432,7 @@ SILInstruction *SILCombiner::visitLoadInst(LoadInst *LI) {
 
     // Ok, we have started to visit the range of instructions associated with
     // a new projection. Create the new address projection.
-    auto I = Proj.createAddrProjection(Builder, LI->getLoc(), LI->getOperand());
+    auto I = Proj.createAddressProjection(Builder, LI->getLoc(), LI->getOperand());
     LastProj = &Proj;
     LastNewLoad = Builder.createLoad(LI->getLoc(), I.get());
     replaceInstUsesWith(*Inst, LastNewLoad);
@@ -803,15 +802,13 @@ SILCombiner::visitInjectEnumAddrInst(InjectEnumAddrInst *IEAI) {
     //  store %1 to %nopayload_addr
     //
     if ((AI = dyn_cast<ApplyInst>(&*II))) {
-      auto Params = AI->getSubstCalleeType()->getParameters();
       unsigned ArgIdx = 0;
       for (auto &Opd : AI->getArgumentOperands()) {
         // Found an apply that initializes the enum. We can optimize this by
         // localizing the initialization to an alloc_stack and loading from it.
         DataAddrInst = dyn_cast<InitEnumDataAddrInst>(Opd.get());
         if (DataAddrInst && DataAddrInst->getOperand() == IEAI->getOperand() &&
-            Params[ArgIdx].getConvention() ==
-                ParameterConvention::Indirect_Out) {
+            ArgIdx < AI->getSubstCalleeType()->getNumIndirectResults()) {
           EnumInitOperand = &Opd;
           break;
         }

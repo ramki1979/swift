@@ -25,6 +25,7 @@
 #include "swift/AST/TypeMemberVisitor.h"
 #include "swift/Basic/Fallthrough.h"
 #include "swift/SIL/SILArgument.h"
+#include "swift/SIL/SILWitnessVisitor.h"
 #include "swift/SIL/TypeLowering.h"
 
 using namespace swift;
@@ -266,7 +267,7 @@ public:
   }
 
   void visitDestructorDecl(DestructorDecl *dd) {
-    if (dd->getParent()->isClassOrClassExtensionContext() == theClass) {
+    if (dd->getParent()->getAsClassOrClassExtensionContext() == theClass) {
       // Add the deallocating destructor to the vtable just for the purpose
       // that it is referenced and cannot be eliminated by dead function removal.
       // In reality, the deallocating destructor is referenced directly from
@@ -289,7 +290,7 @@ static void emitTypeMemberGlobalVariable(SILGenModule &SGM,
                                          NominalTypeDecl *theType,
                                          VarDecl *var) {
   assert(!generics && "generic static properties not implemented");
-  if (var->getDeclContext()->isClassOrClassExtensionContext()) {
+  if (var->getDeclContext()->getAsClassOrClassExtensionContext()) {
     assert(var->isFinal() && "only 'static' ('class final') stored properties are implemented in classes");
   }
 
@@ -330,11 +331,15 @@ public:
       SGM.visit(member);
     }
 
+    if (auto protocol = dyn_cast<ProtocolDecl>(theType)) {
+      if (!protocol->hasFixedLayout())
+        SGM.emitDefaultWitnessTable(protocol);
+
+      return;
+    }
+
     // Emit witness tables for conformances of concrete types. Protocol types
     // are existential and do not have witness tables.
-    if (isa<ProtocolDecl>(theType))
-      return;
-
     for (auto *conformance : theType->getLocalConformances(
                                ConformanceLookupKind::All,
                                nullptr, /*sorted=*/true)) {
@@ -388,6 +393,9 @@ public:
   }
 
   void visitVarDecl(VarDecl *vd) {
+    if (vd->hasBehavior())
+      SGM.emitPropertyBehavior(vd);
+
     // Collect global variables for static properties.
     // FIXME: We can't statically emit a global variable for generic properties.
     if (vd->isStatic() && vd->hasStorage()) {
@@ -479,6 +487,8 @@ public:
   }
 
   void visitVarDecl(VarDecl *vd) {
+    if (vd->hasBehavior())
+      SGM.emitPropertyBehavior(vd);
     if (vd->isStatic() && vd->hasStorage()) {
       ExtensionDecl *ext = cast<ExtensionDecl>(vd->getDeclContext());
       NominalTypeDecl *theType = ext->getExtendedType()->getAnyNominal();
@@ -503,3 +513,52 @@ void SILGenModule::visitExtensionDecl(ExtensionDecl *ed) {
   SILGenExtension(*this).emitExtension(ed);
 }
 
+namespace {
+
+/// Emit a default witness table for a resilient protocol definition.
+struct SILGenDefaultWitnessTable
+    : public SILWitnessVisitor<SILGenDefaultWitnessTable> {
+
+  unsigned MinimumWitnessCount;
+  SmallVector<SILDefaultWitnessTable::Entry, 8> DefaultWitnesses;
+
+  SILGenDefaultWitnessTable() : MinimumWitnessCount(0) {}
+
+  void addOutOfLineBaseProtocol(ProtocolDecl *baseProto) {
+    MinimumWitnessCount++;
+  }
+
+  void addMethod(FuncDecl *func) {
+    MinimumWitnessCount++;
+  }
+
+  void addConstructor(ConstructorDecl *ctor) {
+    MinimumWitnessCount++;
+  }
+
+  void addAssociatedType(AssociatedTypeDecl *ty,
+                         ArrayRef<ProtocolDecl *> protos) {
+    MinimumWitnessCount++;
+
+    for (auto *protocol : protos) {
+      // Only reference the witness if the protocol requires it.
+      if (!Lowering::TypeConverter::protocolRequiresWitnessTable(protocol))
+        continue;
+
+      MinimumWitnessCount++;
+    }
+  }
+};
+
+}
+
+void SILGenModule::emitDefaultWitnessTable(ProtocolDecl *protocol) {
+  SILDefaultWitnessTable *defaultWitnesses =
+      M.createDefaultWitnessTableDeclaration(protocol);
+
+  SILGenDefaultWitnessTable builder;
+  builder.visitProtocolDecl(protocol);
+
+  defaultWitnesses->convertToDefinition(builder.MinimumWitnessCount,
+                                        builder.DefaultWitnesses);
+}

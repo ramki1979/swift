@@ -274,8 +274,12 @@ struct CursorInfo {
   StringRef TypeName;
   StringRef DocComment;
   StringRef TypeInterface;
+  StringRef GroupName;
   /// Annotated XML pretty printed declaration.
   StringRef AnnotatedDeclaration;
+  /// Fully annotated XML pretty printed declaration.
+  /// FIXME: this should eventually replace \c AnnotatedDeclaration.
+  StringRef FullyAnnotatedDeclaration;
   /// Non-empty if the symbol was imported from a clang module.
   StringRef ModuleName;
   /// Non-empty if a generated interface editor document has previously been
@@ -371,6 +375,9 @@ class LangSupport {
   virtual void anchor();
 
 public:
+  /// A separator between parts in a synthesized usr.
+  const static std::string SynthesizedUSRSeparator;
+
   virtual ~LangSupport() { }
 
   virtual void indexSource(StringRef Filename,
@@ -412,12 +419,15 @@ public:
   virtual void editorOpenInterface(EditorConsumer &Consumer,
                                    StringRef Name,
                                    StringRef ModuleName,
-                                   ArrayRef<const char *> Args) = 0;
+                                   Optional<StringRef> Group,
+                                   ArrayRef<const char *> Args,
+                                   bool SynthesizedExtensions) = 0;
 
   virtual void editorOpenHeaderInterface(EditorConsumer &Consumer,
                                          StringRef Name,
                                          StringRef HeaderName,
-                                         ArrayRef<const char *> Args) = 0;
+                                         ArrayRef<const char *> Args,
+                                         bool SynthesizedExtensions) = 0;
 
   virtual void editorOpenSwiftSourceInterface(StringRef Name,
                                               StringRef SourceName,
@@ -458,6 +468,11 @@ public:
   virtual void findInterfaceDocument(StringRef ModuleName,
                                      ArrayRef<const char *> Args,
                     std::function<void(const InterfaceDocInfo &)> Receiver) = 0;
+
+  virtual void findModuleGroups(StringRef ModuleName,
+                                ArrayRef<const char *> Args,
+                                std::function<void(ArrayRef<StringRef>,
+                                                   StringRef Error)> Receiver) = 0;
 
   virtual void getDocInfo(llvm::MemoryBuffer *InputBuf,
                           StringRef ModuleName,

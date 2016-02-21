@@ -403,10 +403,10 @@ GenericSignature::getSubstitutionMap(ArrayRef<Substitution> args) const {
     args = args.slice(1);
     
     if (auto subTy = depTy->getAs<SubstitutableType>()) {
-      subs[subTy] = replacement;
+      subs[subTy->getCanonicalType().getPointer()] = replacement;
     }
     else if (auto dTy = depTy->getAs<DependentMemberType>()) {
-      subs[dTy] = replacement;
+      subs[dTy->getCanonicalType().getPointer()] = replacement;
     }
   }
   
@@ -485,12 +485,21 @@ SmallVector<ProtocolDecl *, 2> GenericSignature::getConformsTo(Type type,
 
 /// Determine whether the given dependent type is equal to a concrete type.
 bool GenericSignature::isConcreteType(Type type, ModuleDecl &mod) {
-  if (!type->isTypeParameter()) return true;
+  return bool(getConcreteType(type, mod));
+}
+
+/// Return the concrete type that the given dependent type is constrained to,
+/// or the null Type if it is not the subject of a concrete same-type
+/// constraint.
+Type GenericSignature::getConcreteType(Type type, ModuleDecl &mod) {
+  if (!type->isTypeParameter()) return Type();
 
   auto &builder = *getArchetypeBuilder(mod);
   auto pa = builder.resolveArchetype(type);
-  if (!pa) return true;
+  if (!pa) return Type();
 
   pa = pa->getRepresentative();
-  return pa->isConcreteType();
+  if (!pa->isConcreteType()) return Type();
+
+  return pa->getConcreteType();
 }

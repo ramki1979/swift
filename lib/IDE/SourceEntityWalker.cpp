@@ -310,6 +310,14 @@ bool SemaAnnotator::walkToTypeReprPost(TypeRepr *T) {
 }
 
 std::pair<bool, Pattern *> SemaAnnotator::walkToPatternPre(Pattern *P) {
+  if (auto *EP = dyn_cast<EnumElementPattern>(P)) {
+    auto *Element = EP->getElementDecl();
+    if (!Element)
+      return { true, P };
+    Type T = EP->hasType() ? EP->getType() : Type();
+    return { passReference(Element, T, DeclNameLoc(EP->getLoc())), P };
+  }
+
   auto *TP = dyn_cast<TypedPattern>(P);
   if (!TP || !TP->isPropagatedType())
     return { true, P };

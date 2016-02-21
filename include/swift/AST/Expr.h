@@ -21,8 +21,10 @@
 #include "swift/AST/ConcreteDeclRef.h"
 #include "swift/AST/DeclNameLoc.h"
 #include "swift/AST/ProtocolConformanceRef.h"
+#include "swift/AST/TypeAlignments.h"
 #include "swift/AST/TypeLoc.h"
 #include "swift/AST/Availability.h"
+#include "llvm/Support/TrailingObjects.h"
 
 namespace llvm {
   struct fltSemantics;
@@ -753,7 +755,7 @@ public:
     return Segments.front()->getStartLoc();
   }
   SourceLoc getEndLoc() const {
-    return Segments.front()->getEndLoc();
+    return Segments.back()->getEndLoc();
   }
   
   static bool classof(const Expr *E) {
@@ -761,7 +763,7 @@ public:
   }
 };
   
-/// MagicIdentifierLiteralExpr - A magic identifier like __FILE__ which expands
+/// MagicIdentifierLiteralExpr - A magic identifier like #file which expands
 /// out to a literal at SILGen time.
 class MagicIdentifierLiteralExpr : public LiteralExpr {
 public:
@@ -1589,6 +1591,8 @@ public:
 /// used to represent the operands to a binary operator.  Note that
 /// expressions like '(4)' are represented with a ParenExpr.
 class TupleExpr : public Expr {
+  // FIXME: We can't use llvm::TrailingObjects yet because there are *three*
+  // trailing buffers here.
   SourceLoc LParenLoc;
   SourceLoc RParenLoc;
   unsigned NumElements;
@@ -2378,7 +2382,6 @@ public:
   }
 };
 
-
 /// FunctionConversionExpr - Convert a function to another function type,
 /// which might involve renaming the parameters or handling substitutions
 /// of subtypes (in the return) or supertypes (in the input).
@@ -2600,19 +2603,18 @@ public:
 /// folded into a tree.  The operands all have even indices, while the
 /// subexpressions with odd indices are all (potentially overloaded)
 /// references to binary operators.
-class SequenceExpr : public Expr {
-  unsigned NumElements;
+class SequenceExpr final : public Expr,
+    private llvm::TrailingObjects<SequenceExpr, Expr *> {
+  friend TrailingObjects;
 
-  Expr **getSubExprs() { return reinterpret_cast<Expr **>(this + 1); }
-  Expr * const *getSubExprs() const {
-    return const_cast<SequenceExpr*>(this)->getSubExprs();
-  }
+  unsigned NumElements;
 
   SequenceExpr(ArrayRef<Expr*> elements)
     : Expr(ExprKind::Sequence, /*Implicit=*/false),
       NumElements(elements.size()) {
     assert(NumElements > 0 && "zero-length sequence!");
-    memcpy(getSubExprs(), elements.data(), elements.size() * sizeof(Expr*));
+    std::uninitialized_copy(elements.begin(), elements.end(),
+                            getTrailingObjects<Expr*>());
   }
 
 public:
@@ -2628,20 +2630,18 @@ public:
   unsigned getNumElements() const { return NumElements; }
 
   MutableArrayRef<Expr*> getElements() {
-    return MutableArrayRef<Expr*>(getSubExprs(), NumElements);
+    return {getTrailingObjects<Expr*>(), NumElements};
   }
 
   ArrayRef<Expr*> getElements() const {
-    return ArrayRef<Expr*>(getSubExprs(), NumElements);
+    return {getTrailingObjects<Expr*>(), NumElements};
   }
 
   Expr *getElement(unsigned i) const {
-    assert(i < NumElements);
-    return getSubExprs()[i];
+    return getElements()[i];
   }
   void setElement(unsigned i, Expr *e) {
-    assert(i < NumElements);
-    getSubExprs()[i] = e;
+    getElements()[i] = e;
   }
 
   // Implement isa/cast/dyncast/etc.
@@ -3693,6 +3693,44 @@ public:
 
   Expr *getSemanticExpr() const { return SemanticExpr; }
   void setSemanticExpr(Expr *SE) { SemanticExpr = SE; }
+};
+
+/// Produces the Objective-C selector of the referenced method.
+///
+/// \code
+/// #selector(UIView.insertSubview(_:aboveSubview:))
+/// \endcode
+class ObjCSelectorExpr : public Expr {
+  SourceLoc KeywordLoc;
+  SourceLoc LParenLoc;
+  Expr *SubExpr;
+  SourceLoc RParenLoc;
+  AbstractFunctionDecl *Method = nullptr;
+
+public:
+  ObjCSelectorExpr(SourceLoc keywordLoc, SourceLoc lParenLoc,
+                   Expr *subExpr, SourceLoc rParenLoc)
+    : Expr(ExprKind::ObjCSelector, /*Implicit=*/false),
+      KeywordLoc(keywordLoc), LParenLoc(lParenLoc), SubExpr(subExpr),
+      RParenLoc(rParenLoc) { }
+
+  Expr *getSubExpr() const { return SubExpr; }
+  void setSubExpr(Expr *expr) { SubExpr = expr; }
+
+  /// Retrieve the Objective-C method to which this expression refers.
+  AbstractFunctionDecl *getMethod() const { return Method; }
+
+  /// Set the Objective-C method to which this expression refers.
+  void setMethod(AbstractFunctionDecl *method) { Method = method; }
+
+  SourceLoc getLoc() const { return KeywordLoc; }
+  SourceRange getSourceRange() const {
+    return SourceRange(KeywordLoc, RParenLoc);
+  }
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::ObjCSelector;
+  }
 };
 
 #undef SWIFT_FORWARD_SOURCE_LOCS_TO

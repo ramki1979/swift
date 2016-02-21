@@ -47,6 +47,7 @@
 #include "llvm/Support/OnDiskHashTable.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/YAMLParser.h"
 
 #include <vector>
 
@@ -54,6 +55,14 @@ using namespace swift;
 using namespace swift::serialization;
 using namespace llvm::support;
 using llvm::BCBlockRAII;
+
+/// Used for static_assert.
+static constexpr bool declIDFitsIn32Bits() {
+  using Int32Info = std::numeric_limits<uint32_t>;
+  using PtrIntInfo = std::numeric_limits<uintptr_t>;
+  using DeclIDTraits = llvm::PointerLikeTypeTraits<DeclID>;
+  return PtrIntInfo::digits - DeclIDTraits::NumLowBitsAvailable <= Int32Info::digits;
+}
 
 namespace {
   /// Used to serialize the on-disk decl hash table.
@@ -75,7 +84,7 @@ namespace {
                                                     key_type_ref key,
                                                     data_type_ref data) {
       uint32_t keyLength = key.str().size();
-      uint32_t dataLength = (sizeof(DeclID) + 1) * data.size();
+      uint32_t dataLength = (sizeof(uint32_t) + 1) * data.size();
       endian::Writer<little> writer(out);
       writer.write<uint16_t>(keyLength);
       writer.write<uint16_t>(dataLength);
@@ -88,7 +97,7 @@ namespace {
 
     void EmitData(raw_ostream &out, key_type_ref key, data_type_ref data,
                   unsigned len) {
-      static_assert(sizeof(DeclID) <= 4, "DeclID too large");
+      static_assert(declIDFitsIn32Bits(), "DeclID too large");
       endian::Writer<little> writer(out);
       for (auto entry : data) {
         writer.write<uint8_t>(entry.first);
@@ -115,7 +124,7 @@ namespace {
                                                     key_type_ref key,
                                                     data_type_ref data) {
       uint32_t keyLength = key.size();
-      uint32_t dataLength = sizeof(DeclID) + sizeof(unsigned);
+      uint32_t dataLength = sizeof(uint32_t) + sizeof(unsigned);
       endian::Writer<little> writer(out);
       writer.write<uint16_t>(keyLength);
       return { keyLength, dataLength };
@@ -127,9 +136,9 @@ namespace {
 
     void EmitData(raw_ostream &out, key_type_ref key, data_type_ref data,
                   unsigned len) {
-      static_assert(sizeof(DeclID) <= 4, "DeclID too large");
+      static_assert(declIDFitsIn32Bits(), "DeclID too large");
       endian::Writer<little> writer(out);
-      writer.write<DeclID>(data.first);
+      writer.write<uint32_t>(data.first);
       writer.write<unsigned>(data.second);
     }
   };
@@ -260,7 +269,7 @@ DeclID Serializer::addLocalDeclContextRef(const DeclContext *DC) {
   if (id != 0)
     return id;
 
-  id = { ++LastLocalDeclContextID };
+  id = ++LastLocalDeclContextID;
   LocalDeclContextsToWrite.push(DC);
   return id;
 }
@@ -285,7 +294,7 @@ DeclContextID Serializer::addDeclContextRef(const DeclContext *DC) {
   if (id)
     return id;
 
-  id = { ++LastDeclContextID };
+  id = ++LastDeclContextID;
   DeclContextsToWrite.push(DC);
 
   return id;
@@ -541,6 +550,7 @@ void Serializer::writeDocBlockInfoBlock() {
 
   BLOCK(COMMENT_BLOCK);
   BLOCK_RECORD(comment_block, DECL_COMMENTS);
+  BLOCK_RECORD(comment_block, GROUP_NAMES);
 
 #undef BLOCK
 #undef BLOCK_RECORD
@@ -1368,7 +1378,7 @@ void Serializer::writeCrossReference(const DeclContext *DC, uint32_t pathLen) {
     Type ty = SD->getInterfaceType()->getCanonicalType();
 
     abbrCode = DeclTypeAbbrCodes[XRefValuePathPieceLayout::Code];
-    bool isProtocolExt = SD->getDeclContext()->isProtocolExtensionContext();
+    bool isProtocolExt = SD->getDeclContext()->getAsProtocolExtensionContext();
     XRefValuePathPieceLayout::emitRecord(Out, ScratchRecord, abbrCode,
                                          addTypeRef(ty),
                                          addIdentifierRef(SD->getName()),
@@ -1383,7 +1393,7 @@ void Serializer::writeCrossReference(const DeclContext *DC, uint32_t pathLen) {
 
         Type ty = storage->getInterfaceType()->getCanonicalType();
         auto nameID = addIdentifierRef(storage->getName());
-        bool isProtocolExt = fn->getDeclContext()->isProtocolExtensionContext();
+        bool isProtocolExt = fn->getDeclContext()->getAsProtocolExtensionContext();
         abbrCode = DeclTypeAbbrCodes[XRefValuePathPieceLayout::Code];
         XRefValuePathPieceLayout::emitRecord(Out, ScratchRecord, abbrCode,
                                              addTypeRef(ty), nameID,
@@ -1411,13 +1421,13 @@ void Serializer::writeCrossReference(const DeclContext *DC, uint32_t pathLen) {
       abbrCode = DeclTypeAbbrCodes[XRefInitializerPathPieceLayout::Code];
       XRefInitializerPathPieceLayout::emitRecord(
         Out, ScratchRecord, abbrCode, addTypeRef(ty),
-        (bool)ctor->getDeclContext()->isProtocolExtensionContext(),
+        (bool)ctor->getDeclContext()->getAsProtocolExtensionContext(),
         getStableCtorInitializerKind(ctor->getInitKind()));
       break;
     }
 
     abbrCode = DeclTypeAbbrCodes[XRefValuePathPieceLayout::Code];
-    bool isProtocolExt = fn->getDeclContext()->isProtocolExtensionContext();
+    bool isProtocolExt = fn->getDeclContext()->getAsProtocolExtensionContext();
     XRefValuePathPieceLayout::emitRecord(Out, ScratchRecord, abbrCode,
                                          addTypeRef(ty),
                                          addIdentifierRef(fn->getName()),
@@ -1485,7 +1495,7 @@ void Serializer::writeCrossReference(const Decl *D) {
 
   auto val = cast<ValueDecl>(D);
   auto ty = val->getInterfaceType()->getCanonicalType();
-  bool isProtocolExt = D->getDeclContext()->isProtocolExtensionContext();
+  bool isProtocolExt = D->getDeclContext()->getAsProtocolExtensionContext();
   abbrCode = DeclTypeAbbrCodes[XRefValuePathPieceLayout::Code];
   XRefValuePathPieceLayout::emitRecord(Out, ScratchRecord, abbrCode,
                                        addTypeRef(ty),
@@ -2647,7 +2657,6 @@ static uint8_t getRawStableParameterConvention(swift::ParameterConvention pc) {
   switch (pc) {
   SIMPLE_CASE(ParameterConvention, Indirect_In)
   SIMPLE_CASE(ParameterConvention, Indirect_In_Guaranteed)
-  SIMPLE_CASE(ParameterConvention, Indirect_Out)
   SIMPLE_CASE(ParameterConvention, Indirect_Inout)
   SIMPLE_CASE(ParameterConvention, Indirect_InoutAliasable)
   SIMPLE_CASE(ParameterConvention, Direct_Owned)
@@ -2662,6 +2671,7 @@ static uint8_t getRawStableParameterConvention(swift::ParameterConvention pc) {
 /// Serialization enum values, which are guaranteed to be stable.
 static uint8_t getRawStableResultConvention(swift::ResultConvention rc) {
   switch (rc) {
+  SIMPLE_CASE(ResultConvention, Indirect)
   SIMPLE_CASE(ResultConvention, Owned)
   SIMPLE_CASE(ResultConvention, Unowned)
   SIMPLE_CASE(ResultConvention, UnownedInnerPointer)
@@ -2932,7 +2942,7 @@ void Serializer::writeType(Type ty) {
   case TypeKind::PolymorphicFunction: {
     auto fnTy = cast<PolymorphicFunctionType>(ty.getPointer());
     const Decl *genericContext = getGenericContext(&fnTy->getGenericParams());
-    DeclID dID = genericContext ? addDeclRef(genericContext) : DeclID(0);
+    DeclID dID = genericContext ? addDeclRef(genericContext) : DeclID();
 
     unsigned abbrCode = DeclTypeAbbrCodes[PolymorphicFunctionTypeLayout::Code];
     PolymorphicFunctionTypeLayout::emitRecord(Out, ScratchRecord, abbrCode,
@@ -2991,31 +3001,28 @@ void Serializer::writeType(Type ty) {
     auto stableRepresentation =
       getRawStableSILFunctionTypeRepresentation(representation);
     
-    auto interfaceResult = fnTy->getResult();
-    TypeID interfaceResultTyID = addTypeRef(interfaceResult.getType());
-    auto stableInterfaceResultConvention =
-      getRawStableResultConvention(interfaceResult.getConvention());
-
-    TypeID errorResultTyID = 0;
-    uint8_t stableErrorResultConvention = 0;
+    SmallVector<TypeID, 8> variableData;
+    for (auto param : fnTy->getParameters()) {
+      variableData.push_back(addTypeRef(param.getType()));
+      unsigned conv = getRawStableParameterConvention(param.getConvention());
+      variableData.push_back(TypeID(conv));
+    }
+    for (auto result : fnTy->getAllResults()) {
+      variableData.push_back(addTypeRef(result.getType()));
+      unsigned conv = getRawStableResultConvention(result.getConvention());
+      variableData.push_back(TypeID(conv));
+    }
     if (fnTy->hasErrorResult()) {
       auto abResult = fnTy->getErrorResult();
-      errorResultTyID = addTypeRef(abResult.getType());
-      stableErrorResultConvention =
-        getRawStableResultConvention(abResult.getConvention());
-    }
-
-    SmallVector<TypeID, 8> paramTypes;
-    for (auto param : fnTy->getParameters()) {
-      paramTypes.push_back(addTypeRef(param.getType()));
-      unsigned conv = getRawStableParameterConvention(param.getConvention());
-      paramTypes.push_back(TypeID(conv));
+      variableData.push_back(addTypeRef(abResult.getType()));
+      unsigned conv = getRawStableResultConvention(abResult.getConvention());
+      variableData.push_back(TypeID(conv));
     }
 
     auto sig = fnTy->getGenericSignature();
     if (sig) {
       for (auto param : sig->getGenericParams())
-        paramTypes.push_back(addTypeRef(param));
+        variableData.push_back(addTypeRef(param));
     }
 
     auto stableCalleeConvention =
@@ -3023,15 +3030,13 @@ void Serializer::writeType(Type ty) {
 
     unsigned abbrCode = DeclTypeAbbrCodes[SILFunctionTypeLayout::Code];
     SILFunctionTypeLayout::emitRecord(Out, ScratchRecord, abbrCode,
-          interfaceResultTyID,
-          stableInterfaceResultConvention,
-          errorResultTyID,
-          stableErrorResultConvention,
           stableCalleeConvention,
           stableRepresentation,
           fnTy->isNoReturn(),
-          sig ? sig->getGenericParams().size() : 0,
-          paramTypes);
+          fnTy->hasErrorResult(),
+          fnTy->getParameters().size(),
+          fnTy->getNumAllResults(),
+          variableData);
     if (sig)
       writeRequirements(sig->getRequirements());
     else
@@ -3413,6 +3418,7 @@ namespace {
 struct DeclCommentTableData {
   StringRef Brief;
   RawComment Raw;
+  uint32_t Group;
 };
 
 class DeclCommentTableInfo {
@@ -3432,16 +3438,19 @@ public:
   std::pair<unsigned, unsigned>
   EmitKeyDataLength(raw_ostream &out, key_type_ref key, data_type_ref data) {
     uint32_t keyLength = key.size();
+    const unsigned numLen = 4;
 
     // Data consists of brief comment length and brief comment text,
-    uint32_t dataLength = 4 + data.Brief.size();
+    uint32_t dataLength = numLen + data.Brief.size();
     // number of raw comments,
-    dataLength += 4;
+    dataLength += numLen;
     // for each raw comment: column number of the first line, length of each
     // raw comment and its text.
     for (auto C : data.Raw.Comments)
-      dataLength += 4 + 4 + C.RawText.size();
+      dataLength += numLen + numLen + C.RawText.size();
 
+    // Group Id.
+    dataLength += numLen;
     endian::Writer<little> writer(out);
     writer.write<uint32_t>(keyLength);
     writer.write<uint32_t>(dataLength);
@@ -3463,19 +3472,191 @@ public:
       writer.write<uint32_t>(C.RawText.size());
       out << C.RawText;
     }
+    writer.write<uint32_t>(data.Group);
   }
 };
 
 } // end unnamed namespace
 
+typedef llvm::StringMap<std::string> FileNameToGroupNameMap;
+typedef std::unique_ptr<FileNameToGroupNameMap> pFileNameToGroupNameMap;
+
+class YamlGroupInputParser {
+  StringRef RecordPath;
+
+  static llvm::StringMap<pFileNameToGroupNameMap> AllMaps;
+
+public:
+  YamlGroupInputParser(StringRef RecordPath): RecordPath(RecordPath) {}
+
+  FileNameToGroupNameMap* getParsedMap() {
+    return AllMaps[RecordPath].get();
+  }
+
+  // Parse the Yaml file that contains the group information.
+  // True on failure; false on success.
+  bool parse() {
+    // If we have already parsed this group info file, return false;
+    auto FindMap = AllMaps.find(RecordPath);
+    if (FindMap != AllMaps.end())
+      return false;
+
+    auto Buffer = llvm::MemoryBuffer::getFile(RecordPath);
+    if (!Buffer) {
+      // The group info file does not exist.
+      return true;
+    }
+    llvm::SourceMgr SM;
+    llvm::yaml::Stream YAMLStream(Buffer.get()->getMemBufferRef(), SM);
+    llvm::yaml::document_iterator I = YAMLStream.begin();
+    if (I == YAMLStream.end()) {
+      // Cannot parse correctly.
+      return true;
+    }
+    llvm::yaml::Node *Root = I->getRoot();
+    if (!Root) {
+      // Cannot parse correctly.
+      return true;
+    }
+
+    // The format is a map of ("group0" : ["file1", "file2"]), meaning all
+    // symbols from file1 and file2 belong to "group0".
+    llvm::yaml::MappingNode *Map = dyn_cast<llvm::yaml::MappingNode>(Root);
+    if (!Map) {
+      return true;
+    }
+    pFileNameToGroupNameMap pMap(new FileNameToGroupNameMap());
+    for (auto Pair : *Map) {
+      auto *Key = dyn_cast_or_null<llvm::yaml::ScalarNode>(Pair.getKey());
+      auto *Value = dyn_cast_or_null<llvm::yaml::SequenceNode>(Pair.getValue());
+
+      if (!Key || !Value) {
+        return true;
+      }
+      llvm::SmallString<16> GroupNameStorage;
+      StringRef GroupName = Key->getValue(GroupNameStorage);
+      for (llvm::yaml::Node &Entry : *Value) {
+        auto *FileEntry= dyn_cast<llvm::yaml::ScalarNode>(&Entry);
+        llvm::SmallString<16> FileNameStorage;
+        StringRef FileName = FileEntry->getValue(FileNameStorage);
+        (*pMap)[FileName] = GroupName;
+      }
+    }
+
+    // Save the parsed map to the owner.
+    AllMaps[RecordPath] = std::move(pMap);
+    return false;
+  }
+};
+
+llvm::StringMap<pFileNameToGroupNameMap> YamlGroupInputParser::AllMaps;
+
+class DeclGroupNameContext {
+  struct GroupNameCollector {
+    const std::string NullGroupName = "";
+    const bool Enable;
+    GroupNameCollector(bool Enable) : Enable(Enable) {}
+    virtual ~GroupNameCollector() = default;
+    virtual StringRef getGroupNameInternal(const ValueDecl *VD) = 0;
+    StringRef getGroupName(const ValueDecl *VD) {
+      return Enable ? getGroupNameInternal(VD) : StringRef(NullGroupName);
+    };
+  };
+
+  // FIXME: Implement better name collectors.
+  struct GroupNameCollectorFromFileName : public GroupNameCollector {
+    GroupNameCollectorFromFileName(bool Enable) : GroupNameCollector(Enable) {}
+    StringRef getGroupNameInternal(const ValueDecl *VD) override {
+      auto PathOp = VD->getDeclContext()->getParentSourceFile()->getBufferID();
+      if (!PathOp.hasValue())
+        return NullGroupName;
+      return llvm::sys::path::stem(StringRef(VD->getASTContext().SourceMgr.
+        getIdentifierForBuffer(PathOp.getValue())));
+    }
+  };
+
+  class GroupNameCollectorFromJson : public GroupNameCollector {
+    const std::string GroupInfoFileName = "GroupInfo.json";
+    FileNameToGroupNameMap* pMap = nullptr;
+
+  public:
+    GroupNameCollectorFromJson(bool Enable) : GroupNameCollector(Enable) {}
+    StringRef getGroupNameInternal(const ValueDecl *VD) override {
+      auto PathOp = VD->getDeclContext()->getParentSourceFile()->getBufferID();
+      if (!PathOp.hasValue())
+        return NullGroupName;
+      StringRef FullPath = StringRef(VD->getASTContext().SourceMgr.
+                                     getIdentifierForBuffer(PathOp.getValue()));
+      if (!pMap) {
+        llvm::SmallString<64> Path;
+
+        // The group info should be in the same directory with the source file.
+        llvm::sys::path::append(Path, llvm::sys::path::parent_path(FullPath),
+                                GroupInfoFileName);
+        YamlGroupInputParser Parser(Path.str());
+        if (!Parser.parse()) {
+
+          // Get the file-name to group map if parsing correctly.
+          pMap = Parser.getParsedMap();
+        }
+      }
+      if (!pMap)
+        return NullGroupName;
+      StringRef FileName = llvm::sys::path::filename(FullPath);
+      auto Found = pMap->find(FileName);
+      return Found == pMap->end() ? NullGroupName : Found->second;
+    }
+  };
+
+  llvm::MapVector<StringRef, unsigned> Map;
+  std::vector<StringRef> ViewBuffer;
+  std::unique_ptr<GroupNameCollector> pNameCollector;
+
+public:
+  DeclGroupNameContext(bool Enable) :
+    pNameCollector(new GroupNameCollectorFromJson(Enable)) {}
+  uint32_t getGroupSequence(const ValueDecl *VD) {
+    return Map.insert(std::make_pair(pNameCollector->getGroupName(VD),
+                                     Map.size())).first->second;
+  }
+
+  ArrayRef<StringRef> getOrderedGroupNames() {
+    ViewBuffer.clear();
+    for(auto It = Map.begin(); It != Map.end(); ++ It) {
+      ViewBuffer.push_back(It->first);
+    }
+    return llvm::makeArrayRef(ViewBuffer);
+  }
+};
+
+static void writeGroupNames(const comment_block::GroupNamesLayout &GroupNames,
+                            ArrayRef<StringRef> Names) {
+  llvm::SmallString<32> Blob;
+  llvm::raw_svector_ostream BlobStream(Blob);
+  endian::Writer<little> Writer(BlobStream);
+  Writer.write<uint32_t>(Names.size());
+  for (auto N : Names) {
+    Writer.write<uint32_t>(N.size());
+    BlobStream << N;
+  }
+  BlobStream.str();
+  SmallVector<uint64_t, 8> Scratch;
+  GroupNames.emit(Scratch, Blob);
+}
+
 static void writeDeclCommentTable(
     const comment_block::DeclCommentListLayout &DeclCommentList,
-    const SourceFile *SF, const Module *M) {
+    const SourceFile *SF, const Module *M,
+    DeclGroupNameContext &GroupContext) {
 
   struct DeclCommentTableWriter : public ASTWalker {
     llvm::BumpPtrAllocator Arena;
     llvm::SmallString<512> USRBuffer;
     llvm::OnDiskChainedHashTableGenerator<DeclCommentTableInfo> generator;
+    DeclGroupNameContext &GroupContext;
+
+    DeclCommentTableWriter(DeclGroupNameContext &GroupContext) :
+      GroupContext(GroupContext) {}
 
     StringRef copyString(StringRef String) {
       char *Mem = static_cast<char *>(Arena.Allocate(String.size(), 1));
@@ -3502,12 +3683,13 @@ static void writeDeclCommentTable(
       }
 
       generator.insert(copyString(USRBuffer.str()),
-                       { VD->getBriefComment(), Raw });
+                       { VD->getBriefComment(), Raw,
+                         GroupContext.getGroupSequence(VD) });
       return true;
     }
   };
 
-  DeclCommentTableWriter Writer;
+  DeclCommentTableWriter Writer(GroupContext);
 
   ArrayRef<const FileUnit *> files = SF ? SF : M->getFiles();
   for (auto nextFile : files)
@@ -3547,7 +3729,8 @@ namespace {
                                                     data_type_ref data) {
       llvm::SmallString<32> scratch;
       uint32_t keyLength = key.getString(scratch).size();
-      uint32_t dataLength = (sizeof(TypeID) + 1 + sizeof(DeclID)) * data.size();
+      size_t entrySize = sizeof(uint32_t) + 1 + sizeof(uint32_t);
+      uint32_t dataLength = entrySize * data.size();
 
       endian::Writer<little> writer(out);
       writer.write<uint16_t>(keyLength);
@@ -3561,7 +3744,7 @@ namespace {
 
     void EmitData(raw_ostream &out, key_type_ref key, data_type_ref data,
                   unsigned len) {
-      static_assert(sizeof(DeclID) <= 4, "DeclID too large");
+      static_assert(declIDFitsIn32Bits(), "DeclID too large");
       endian::Writer<little> writer(out);
       for (auto entry : data) {
         writer.write<uint32_t>(std::get<0>(entry));
@@ -3812,9 +3995,16 @@ void Serializer::writeToStream(raw_ostream &os, ModuleOrSourceFile DC,
   S.writeToStream(os);
 }
 
+static bool isStdlibModule(ModuleOrSourceFile DC) {
+  if (auto M = DC.dyn_cast<ModuleDecl*>()) {
+    return M->isStdlibModule();
+  }
+  return false;
+}
+
 void Serializer::writeDocToStream(raw_ostream &os, ModuleOrSourceFile DC) {
   Serializer S{MODULE_DOC_SIGNATURE, DC};
-
+  bool isStdlib = isStdlibModule(DC);
   // FIXME: This is only really needed for debugging. We don't actually use it.
   S.writeDocBlockInfoBlock();
 
@@ -3823,9 +4013,13 @@ void Serializer::writeDocToStream(raw_ostream &os, ModuleOrSourceFile DC) {
     S.writeDocHeader();
     {
       BCBlockRAII restoreBlock(S.Out, COMMENT_BLOCK_ID, 4);
-
+      DeclGroupNameContext GroupContext(isStdlib);
       comment_block::DeclCommentListLayout DeclCommentList(S.Out);
-      writeDeclCommentTable(DeclCommentList, S.SF, S.M);
+      writeDeclCommentTable(DeclCommentList, S.SF, S.M, GroupContext);
+      comment_block::GroupNamesLayout GroupNames(S.Out);
+
+      // FIXME: Multi-file compilation may cause group id collision.
+      writeGroupNames(GroupNames, GroupContext.getOrderedGroupNames());
     }
   }
 

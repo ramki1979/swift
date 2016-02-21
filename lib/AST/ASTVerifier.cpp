@@ -1742,7 +1742,7 @@ struct ASTNodeBase {};
       } else {
         auto ext = cast<ExtensionDecl>(decl);
         conformingDC = ext;
-        nominal = ext->isNominalTypeOrNominalTypeExtensionContext();
+        nominal = ext->getAsNominalTypeOrNominalTypeExtensionContext();
       }
 
       auto proto = conformance->getProtocol();
@@ -2673,6 +2673,20 @@ struct ASTNodeBase {};
       }
       checkSourceRanges(P->getSourceRange(), Parent,
                         [&]{ P->print(Out); });
+    }
+
+    void assertValidRegion(Decl *D) {
+      auto R = D->getSourceRange();
+      if (R.isValid() && Ctx.SourceMgr.isBeforeInBuffer(R.End, R.Start)) {
+        Out << "invalid type source range for decl: ";
+        D->print(Out);
+        Out << "\n";
+        abort();
+      }
+    }
+
+    void checkSourceRanges(ParamDecl *PD) {
+      assertValidRegion(PD);
     }
 
     void checkSourceRanges(Decl *D) {
